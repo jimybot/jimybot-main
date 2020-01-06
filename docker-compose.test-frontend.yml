@@ -1,0 +1,20 @@
+version: '3.2'
+
+services:
+  frontend-test-frontend:
+    build:
+      context: ./webapp
+      dockerfile: ./Dockerfile
+    command: >
+      bash -c "set -x;
+               source ~/.profile;
+               ln -sf /lib/node/node_modules /opt/frontend;
+               cp /lib/node/yarn.lock /opt/frontend/yarn.lock;
+               cd /opt/frontend;
+               yarn test:frontend;"
+    container_name: ${APP_NAME}-frontend-test-frontend
+    environment:
+      - ENV=${ENV:-development}
+      - ROOT_PATH=http://localhost:3000
+    volumes:
+      - ./webapp:/opt/frontend

@@ -1,0 +1,9 @@
+$columns-count: 12;
+$gutter-width: 24px;
+$column-width: 61px;
+$header-height: 3rem;
+$header-and-footer-max-width: 1920px;
+$page-padding: 4rem;
+
+$column-with-gutter: $gutter-width + $column-width;
+$main-max-width: $columns-count * $column-with-gutter;

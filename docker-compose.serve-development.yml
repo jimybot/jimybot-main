@@ -1,0 +1,66 @@
+version: '3.2'
+
+services:
+  api-serve-development:
+    build:
+      context: ./api
+      dockerfile: ./Dockerfile
+    command: >
+      bash -c "set -x;
+               cd /opt/api;
+               while true; do python app.py; done;"
+    container_name: ${APP_NAME}-api-serve-development
+    depends_on:
+      - postgres-serve-development
+    environment:
+      - APP_NAME=$APP_NAME
+      - BUZZSUMO_API_KEY=$BUZZSUMO_API_KEY
+      - COMMAND_NAME=$COMMAND_NAME
+      - ENV=${ENV:-development}
+      - OBJECT_STORAGE_URL=$OBJECT_STORAGE_URL
+      - POSTGRES_URL=postgresql://${DB_NAME}_user:${DB_NAME}_password@postgres-serve-development/${DB_NAME}
+      - SCREEN_SHOT_MACHINE_KEY=$SCREEN_SHOT_MACHINE_KEY
+      - TLD=$TLD
+    image: $APP_NAME-api-serve-development
+    networks:
+      - db_server_development_nw
+      - web_server_development_nw
+    volumes:
+      - ./api:/opt/api
+
+  nginx-serve-development:
+    build:
+      args:
+        - MODE=serve-development
+      context: ./nginx
+      dockerfile: ./Dockerfile.nossl
+    container_name: ${APP_NAME}-nginx-serve-development
+    depends_on:
+      - api-serve-development
+    image: $APP_NAME-nginx-serve-development
+    networks:
+      - web_server_development_nw
+    ports:
+      - 80:80
+
+  postgres-serve-development:
+    command: postgres -c logging_collector=on -c log_destination=stderr -c log_min_duration_statement=0 -c log_statement=all -c log_duration=on
+    container_name: ${APP_NAME}-postgres-serve-development
+    environment:
+      - POSTGRES_DB=${DB_NAME}
+      - POSTGRES_PASSWORD=${DB_NAME}_password
+      - POSTGRES_USER=${DB_NAME}_user
+    image: postgres:10.1
+    networks:
+      - db_server_development_nw
+    volumes:
+      - "./docker_data_serve-development/postgres:/var/lib/postgresql"
+
+networks:
+  db_server_development_nw:
+    driver: bridge
+  web_server_development_nw:
+    driver: bridge
+
+volumes:
+  docker_data_serve-development:

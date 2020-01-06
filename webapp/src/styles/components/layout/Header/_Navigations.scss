@@ -1,0 +1,17 @@
+.navigations {
+  display: none;
+
+  @media(min-width: $tablet) {
+    display: inherit;
+  }
+
+  .navigation {
+    font-size: $font-size-big;
+    margin-right: 1rem;
+
+    .current {
+      border-bottom: 2px solid $primary;
+      padding-bottom: 0.25rem;
+    }
+  }
+}

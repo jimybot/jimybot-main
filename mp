@@ -1,0 +1,374 @@
+#!/bin/bash
+
+set -o nounset
+
+# =============================================
+#  Global config of the application
+# =============================================
+
+PRG="$BASH_SOURCE"
+while [ -h "$PRG" ] ; do
+  ls=$(ls -ld "$PRG")
+  link=$(expr "$ls" : '.*-> \(.*\)$')
+  if expr "$link" : '/.*' > /dev/null; then
+    PRG="$link"
+  else
+    PRG=$(dirname "$PRG")"/$link"
+  fi
+done
+
+ROOT_PATH="."
+if [ -x "$(command -v realpath)" ]; then
+  ROOT_PATH=$(realpath "$(dirname "$PRG")")
+fi
+
+set -o allexport
+[[ -f $ROOT_PATH/.env ]] && source $ROOT_PATH/.env
+set +o allexport
+
+# =============================================
+#  Helper that describes all functionalities
+# =============================================
+
+PARAM_FIELDS="option name entries default help"
+if [[ $# -eq 0 ]] || [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
+  echo "$(basename "$0") -- program to deal with $APP_NAME ecosystem
+where:
+  -h                                                                                                show this help text"
+  while read $PARAM_FIELDS; do
+    printf "  %s=%-12s %-50s %-30s %s\n" $option "<$name>" "$(sed -e 's/^"//' -e 's/"$//' <<<"$entries")" "(default: $default)" "$(sed -e 's/^"//' -e 's/"$//' <<<"$help")"
+  done < params.txt
+  exit 0
+fi
+
+# =============================================
+# Get script parameters
+# =============================================
+
+while read $PARAM_FIELDS; do
+  eval "$name=$default"
+done < $ROOT_PATH/params.txt
+
+while read; do
+  while read $PARAM_FIELDS; do
+    if [[ $# -gt 2 ]]; then
+      if [[ "$1" == "$option" ]]; then
+        eval "$name=$2"
+        shift 2
+      fi
+    fi
+  done < $ROOT_PATH/params.txt
+done < $ROOT_PATH/params.txt
+
+set -o allexport
+[[ -f $ROOT_PATH/.env.$ENV ]] && source $ROOT_PATH/.env.$ENV
+set +o allexport
+
+if [[ "$TAG" != "not-set" ]] && [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+  echo "tag format should be Semantic Versioning compliant x.x.x"
+  exit 1
+fi
+
+CMD="$1"
+
+shift
+
+# =============================================
+# Set variables for env
+# =============================================
+
+API_SERVICE=${APP_NAME}-api-$MODE
+DATABASE_NAME=${APP_NAME}_$DATABASE
+DATABASE_PASSWORD=${APP_NAME}_password
+DATABASE_SERVICE=$APP_NAME-${DATABASE}db-$MODE
+DATABASE_USER=${APP_NAME}_user
+
+if [[ "$ENV" == "production" ]]; then
+	SCALINGO_APP=$APP_NAME-backend
+elif [[ ! "$ENV" == "development" ]]; then
+	SCALINGO_APP=$APP_NAME-backend-$ENV
+fi
+
+# =============================================
+# Utilities functions
+# =============================================
+
+RED='\033[0;31m'
+ORANGE='\033[0;33m'
+WARNING_COLOR='\e[38;5;197m'
+NO_COLOR='\033[0m'
+
+UNAME_OUT="$(uname -s)"
+case "${UNAME_OUT}" in
+    Linux*)     MACHINE=Linux;;
+    Darwin*)    MACHINE=Mac;;
+    CYGWIN*)    MACHINE=Cygwin;;
+    MINGW*)     MACHINE=MinGw;;
+    *)          MACHINE="UNKNOWN:${UNAME_OUT}"
+esac
+
+function confirm {
+ read -p "$1 (y/n) : " -n 1 -r
+ echo
+ if [[ ! $REPLY =~ ^[Yy]$ ]]
+ then
+   exit
+ fi
+}
+
+function ensure_remote {
+  if [[ "$ENV" == "development" ]]; then
+    echo "$1"
+    exit 3
+  fi
+}
+
+function echo_error {
+  echo -e "${RED}""$1""${NO_COLOR}"
+}
+
+function echo_warning {
+  echo -e "${ORANGE}""$1""${NO_COLOR}"
+}
+
+current_branch=$(git symbolic-ref -q HEAD)
+current_branch=${current_branch##refs/heads/}
+
+function update_branch {
+  branch="$1"
+  git fetch
+  git checkout $branch
+  git reset --hard origin/$branch || exit_error_restoring_branch
+  git submodule update || exit_error_restoring_branch
+}
+
+function exit_error_restoring_branch {
+  git checkout "$current_branch"
+  exit 1
+}
+
+function exit_success_restoring_branch {
+  git checkout "$current_branch"
+  exit 0
+}
+
+# =============================================
+# Local commands : use Docker
+# =============================================
+
+# Run alembic migration
+# Need to specify what alembic command you want to execute
+# Example: ./$COMMAND_NAME alembic upgrade HEAD
+if [[ "$CMD" == "alembic" ]]; then
+  RUN='docker exec $API_SERVICE bash -c "cd /opt/api && PYTHONPATH=. alembic '"$*"'"'
+
+# Connect to API container
+elif [[ "$CMD" == bash ]]; then
+	if [[ "$PLATFORM" == "localhost" ]]; then
+		RUN='docker exec -it $API_SERVICE bash'
+	elif [[ "$PLATFORM" == "scalingo" ]]; then
+		scalingo -a "$SCALINGO_APP" run "bash"
+		exit
+	fi
+
+# Clean all type of data
+elif [[ "$CMD" == clean ]]; then
+  TARGET=$1
+  if [[ "$TARGET" == "storage" ]]; then
+    RUN='cd $ROOT_PATH;
+         sudo rm -rf api/static/object_store_data;'
+  else
+    RUN='cd $ROOT_PATH;
+         sh scripts/clean.sh $MODE $TARGET;'
+  fi
+
+# Create diff output between schema in staging & local backend
+elif [[ "$CMD" == "diff-schema" ]]; then
+  docker exec $DATABASE_SERVICE pg_dump -d $DATABASE_SERVICE -U $DATABASE_USER -s > /tmp/$COMMAND_NAME_schema_local
+  scalingo -a $APP_NAME-api-staging run 'dbclient-fetcher postgresql 10.4 && pg_dump "$SCALINGO_POSTGRESQL_URL" -s' > /tmp/$COMMAND_NAME_schema_staging
+  diff /tmp/$COMMAND_NAME_schema_staging /tmp/$COMMAND_NAME_schema_local
+  exit
+
+# Dump database into pgdump file
+elif [[ "$CMD" == "dump-db" ]]; then
+  RUN='mkdir -p "$ROOT_PATH/db_dumps";
+       docker exec $DATABASE_SERVICE bash -c "PGPASSWORD='$DATABASE_PASSWORD' pg_dump -h localhost -d '$DATABASE_NAME' -U '$DATABASE_USER' -F c > "/var/lib/postgresql/`date +%Y%m%d_%H%M%S`.pgdump'
+
+# Create schema_init.sql into alembic
+elif [[ "$CMD" == "schema-db" ]]; then
+  if [[ "$ENV" == "development" ]]; then
+    RUN='docker exec $DATABASE_SERVICE bash -c "PGPASSWORD='$DATABASE_PASSWORD' pg_dump -h localhost -d '$DATABASE_NAME' --no-owner --no-privileges --schema-only -U '$DATABASE_USER' -F p > /var/lib/postgresql/schema_`date +%Y%m%d_%H%M%S`.pgdump"'
+  else
+    RUN="cd $ROOT_PATH;
+        ./scripts/scalingo/schema_db.sh -a $SCALINGO_APP -b $ROOT_PATH/docker_data_$MODE "
+  fi
+
+# Dump database into pgdump file
+elif [[ "$CMD" == "env" ]]; then
+  cat $ROOT_PATH/.env
+  echo ""
+  while read $PARAM_FIELDS; do
+    echo "$name=$(eval echo \$$name)"
+  done < $ROOT_PATH/params.txt
+  exit;
+
+# Kill ALL docker containersy/
+elif [[ "$CMD" == "kill-all-containers" ]]; then
+  confirm "Warning: all your docker containers are going to be killed ?"
+  RUN='docker kill $(docker ps -q)'
+
+# Build the docker images
+elif [[ "$CMD" == build ]]; then
+  RUN='cd $ROOT_PATH;
+       docker-compose -f docker-compose.$MODE.yml build $*;'
+
+# Pull and build the docker images from no cache
+elif [[ "$CMD" == rebuild ]]; then
+  cd $ROOT_PATH
+  docker-compose -f docker-compose.$MODE.yml pull $*
+  ./$COMMAND_NAME -m $MODE build --no-cache $*
+  exit
+
+# Restart docker-compose up with forcing recreation and unmounting volumes
+elif [[ "$CMD" == restart ]]; then
+  docker-compose -f docker-compose.$MODE.yml down --volumes $*
+  ./$COMMAND_NAME -m $MODE start --force-recreate $*
+  exit
+
+# Start docker-compose up with adapted env variables or webapps with local env
+elif [[ "$CMD" == start ]]; then
+  if [[ "$MODE" == "serve-webapp" ]]; then
+    RUN='cd $ROOT_PATH/webapp;
+         yarn start;'
+  else
+    RUN='cd $ROOT_PATH;
+         sh scripts/start_$MODE.sh $*;'
+  fi
+
+# Stop development containers
+elif [[ "$CMD" == stop ]]; then
+  RUN='cd $ROOT_PATH;
+       docker-compose -f docker-compose.$MODE.yml stop $*;'
+
+
+# =============================================
+# Deploy commands
+# =============================================
+
+# Tag new version using main repo
+elif [[ "$CMD" == "tag" ]]; then
+  if [[ "$TAG" != "not-set" ]]; then
+    TAG_VERSION="v$TAG"
+
+    cd "$ROOT_PATH"/api
+    echo "$TAG_VERSION" > version.txt
+
+    cd "$ROOT_PATH"
+    git add .
+
+    cd "$ROOT_PATH"/webapp
+    yarn version --new-version "$tag_name"
+
+    git commit -m "🚀 $TAG_VERSION"
+    git push origin master
+    git push origin "$TAG_VERSION"
+
+    echo "New version tagged : $TAG"
+
+    exit_success_restoring_branch
+  else
+    echo "You need to specify a tag."
+    exit
+  fi
+
+# Deploy all components using main repo
+elif [[ "$CMD" == "deploy" ]]; then
+  ensure_remote "Deploy cannot be run on the local environment. Use (for example) \"$COMMAND_NAME -e staging -t X.Y.Z "$CMD"\"."
+
+  if [[ "$TAG" == 'not-set' ]]; then
+    echo_error "ERROR: You need to specify an existing tag to deploy"
+    exit_error_restoring_branch
+  fi
+
+  echo "$TAG will be deployed to $ENV"
+  cd $ROOT_PATH
+  update_branch $ENV
+
+  if [[ ! -z $(git ls-remote --tags origin refs/tags/v"$TAG") ]]; then
+    git checkout "v$TAG"
+  else
+    echo_error "ERROR: You need to specify an existing remote tag to deploy"
+    exit_error_restoring_branch
+  fi
+
+  commit_to_deploy=$(git log -n 1 --pretty=format:%H)
+  if [[ "$ENV" == "production" ]]; then
+    confirm "Warning: code will be deployed to production. Are you sure ?"
+    update_branch staging
+    staging_commit=$(git log -n 1 --pretty=format:%H staging)
+    if [[ "$staging_commit" != "$commit_to_deploy" ]]; then
+      echo_error "ERROR: Can only deploy in production commits that are also deployed in staging"
+      exit_error_restoring_branch
+    fi
+  fi
+
+  git push -f origin HEAD:"$ENV"
+
+  exit_success_restoring_branch
+
+# =============================================
+# Initialization commands
+# =============================================
+
+# Install new local environment
+elif [[ "$CMD" == "install" ]]; then
+  RUN='cd $ROOT_PATH/webapp;
+			 yarn;'
+
+# Create $nk to use "$(echo $COMMAND_NAME)" command (admin rights may be needed)
+elif [[ "$CMD" == "symlink" ]]; then
+	RUN='cd /usr/local/bin && ln -sf '"$(pwd)"'/$COMMAND_NAME $COMMAND_NAME && chmod +x $COMMAND_NAME && chmod +x '"$(pwd)"'/$COMMAND_NAME'
+
+# =============================================
+# Administration commands
+# =============================================
+
+# Connect to Postgresql database in command line
+elif [[ "$CMD" == psql ]]; then
+	COLUMNS=${COLUMNS:-''};
+	if [[ "$ENV" == "development" ]]; then
+    RUN='docker exec -it $API_SERVICE bash -c "COLUMNS=\"'$COLUMNS'\" psql -U '$DB_NAME'_user '$DB_NAME' $*"'
+	else
+		scalingo -a $SCALINGO_APP pgsql-console
+		exit
+  fi
+
+# Open a python prompt in the specified environment
+elif [[ "$CMD" == python ]]; then
+	if [[ "$ENV" == "development" ]]; then
+		RUN='docker exec -it $API_SERVICE bash -c "cd /opt/api && PYTHONPATH=. python -i scripts/shell.py '"$CMD $*"'"'
+	else
+		scalingo -a "$SCALINGO_APP" run "python -i scripts/shell.py"
+		exit
+	fi
+
+# =============================================
+# Python Scripts commands
+# =============================================
+
+# Run python scripts from api/scripts
+else
+  if [[ "$ENV" == "development" ]]; then
+    RUN='docker exec $API_SERVICE bash -c "cd /opt/api && PYTHONPATH=. python scripts/manager.py '"$CMD $*"'"'
+  else
+    scalingo -a "$SCALINGO_APP" run 'python scripts/manager.py '"$CMD $*"''
+    exit
+  fi
+fi
+
+# =============================================
+# Execute command
+# =============================================
+
+echo $RUN
+eval $RUN

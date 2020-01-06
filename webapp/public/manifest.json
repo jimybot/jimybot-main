@@ -1,0 +1,26 @@
+{
+  "short_name": "Mayane Webapp",
+  "name": "Mayane Webapp",
+  "icons": [
+    {
+      "sizes": "16x16",
+      "src": "/static/icons/favicon-neg-16.png",
+      "type": "image/png"
+    },
+    {
+      "sizes": "192x192",
+      "src": "/static/icons/xxxhdpi/ic_launcher_APP.png",
+      "type": "image/png"
+
+    },
+    {
+      "sizes": "512x512",
+      "src": "/static/icons/play/ic_launcher_APP.png",
+      "type": "image/png"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#000000",
+  "background_color": "#ffffff"
+}

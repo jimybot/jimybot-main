@@ -1,0 +1,19 @@
+.home {
+  display: flex;
+  justify-content: center;
+  height: 100vh;
+
+  .navigations {
+    padding: 1rem;
+
+    a {
+      @extend .button;
+      @extend .is-primary;
+
+      display: block;
+      margin-bottom: 1.5rem;
+      padding-top: 0.825rem;
+      width: 20rem;
+    }
+  }
+}
